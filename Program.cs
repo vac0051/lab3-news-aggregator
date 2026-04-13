@@ -23,16 +23,27 @@ internal static partial class Program
             var dashboard = await aggregator.LoadDashboardAsync(cts.Token);
 
             Console.WriteLine("=== Результаты асинхронных запросов ===");
-            Console.WriteLine($"Погода: {dashboard.WeatherSummary}");
-            Console.WriteLine($"Курсы: {dashboard.RatesSummary}");
-            Console.WriteLine("Новости:");
-            foreach (var headline in dashboard.Headlines)
+            Console.WriteLine($"Погода (Open-Meteo API): {dashboard.WeatherSummary}");
+            Console.WriteLine($"Курсы (Frankfurter + ЦБ РФ API): {dashboard.RatesSummary}");
+
+            Console.WriteLine("\nНовости (Hacker News API):");
+            foreach (var headline in dashboard.HackerNewsHeadlines)
+            {
+                Console.WriteLine($"- {headline}");
+            }
+
+            Console.WriteLine("\nНовости (Spaceflight News API):");
+            foreach (var headline in dashboard.SpaceflightHeadlines)
             {
                 Console.WriteLine($"- {headline}");
             }
 
             Console.WriteLine("\n=== Параллельный анализ текста ===");
-            var topWords = TextAnalyzer.FindTopWordsParallel(dashboard.Headlines, 8, cts.Token);
+            var combinedHeadlines = dashboard.HackerNewsHeadlines
+                .Concat(dashboard.SpaceflightHeadlines)
+                .ToList();
+
+            var topWords = TextAnalyzer.FindTopWordsParallel(combinedHeadlines, 8, cts.Token);
             foreach (var word in topWords)
             {
                 Console.WriteLine($"{word.Key}: {word.Value}");
@@ -86,14 +97,16 @@ internal sealed class DataAggregator
     {
         var weatherTask = GetWeatherSummarySafeAsync(cancellationToken);
         var ratesTask = GetRatesSummarySafeAsync(cancellationToken);
-        var headlinesTask = GetHeadlinesSafeAsync(cancellationToken);
+        var hackerNewsTask = GetHackerNewsHeadlinesSafeAsync(cancellationToken);
+        var spaceflightTask = GetSpaceflightHeadlinesSafeAsync(cancellationToken);
 
-        await Task.WhenAll(weatherTask, ratesTask, headlinesTask);
+        await Task.WhenAll(weatherTask, ratesTask, hackerNewsTask, spaceflightTask);
 
         return new DashboardResult(
             weatherTask.Result,
             ratesTask.Result,
-            headlinesTask.Result);
+            hackerNewsTask.Result,
+            spaceflightTask.Result);
     }
 
     private async Task<string> GetWeatherSummarySafeAsync(CancellationToken cancellationToken)
@@ -128,11 +141,11 @@ internal sealed class DataAggregator
         }
     }
 
-    private async Task<IReadOnlyList<string>> GetHeadlinesSafeAsync(CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<string>> GetHackerNewsHeadlinesSafeAsync(CancellationToken cancellationToken)
     {
         try
         {
-            return await GetHeadlinesAsync(cancellationToken);
+            return await GetHackerNewsHeadlinesAsync(cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -142,9 +155,28 @@ internal sealed class DataAggregator
         {
             return
             [
-                "offline fallback: local async headline one",
-                "offline fallback: local async headline two",
-                "offline fallback: local async headline three"
+                "offline fallback: hacker news headline one",
+                "offline fallback: hacker news headline two"
+            ];
+        }
+    }
+
+    private async Task<IReadOnlyList<string>> GetSpaceflightHeadlinesSafeAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await GetSpaceflightHeadlinesAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return
+            [
+                "offline fallback: spaceflight headline one",
+                "offline fallback: spaceflight headline two"
             ];
         }
     }
@@ -162,42 +194,86 @@ internal sealed class DataAggregator
         return $"Москва {weatherResponse.Current.Temperature2m:F1}°C, ветер {weatherResponse.Current.WindSpeed10m:F1} м/с";
     }
 
-    private async Task<string> GetRatesSummaryAsync(CancellationToken cancellationToken)
+            private async Task<string> GetRatesSummaryAsync(CancellationToken cancellationToken)
     {
-        const string url = "https://api.frankfurter.app/latest?from=USD&to=EUR,RUB";
-        var rateResponse = await _httpClient.GetFromJsonAsync<RatesApiResponse>(url, cancellationToken);
+        const string eurUrl = "https://api.frankfurter.app/latest?from=USD&to=EUR";
+        const string rubUrl = "https://www.cbr-xml-daily.ru/daily_json.js";
 
-        if (rateResponse?.Rates is null)
+        var eurText = "n/a";
+        var rubText = "n/a";
+
+        try
         {
-            return "нет данных";
+            var eurResponse = await _httpClient.GetFromJsonAsync<RatesApiResponse>(eurUrl, cancellationToken);
+            if (eurResponse?.Rates is not null && eurResponse.Rates.TryGetValue("EUR", out var eur))
+            {
+                eurText = eur.ToString("F3");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
         }
 
-        var eurText = rateResponse.Rates.TryGetValue("EUR", out var eur)
-            ? eur.ToString("F3")
-            : "n/a";
-
-        var rubText = rateResponse.Rates.TryGetValue("RUB", out var rub)
-            ? rub.ToString("F3")
-            : "n/a";
+        try
+        {
+            var rubResponse = await _httpClient.GetFromJsonAsync<CbrDailyResponse>(rubUrl, cancellationToken);
+            if (rubResponse?.Valute?.Usd is not null)
+            {
+                rubText = rubResponse.Valute.Usd.Value.ToString("F3");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+        }
 
         return $"1 USD = {eurText} EUR, {rubText} RUB";
     }
-
-    private async Task<IReadOnlyList<string>> GetHeadlinesAsync(CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<string>> GetHackerNewsHeadlinesAsync(CancellationToken cancellationToken)
     {
-        const string url = "https://jsonplaceholder.typicode.com/posts?_limit=8";
-        var posts = await _httpClient.GetFromJsonAsync<List<PostDto>>(url, cancellationToken);
+        const string url = "https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=5";
+        var response = await _httpClient.GetFromJsonAsync<HackerNewsResponse>(url, cancellationToken);
 
-        if (posts is null || posts.Count == 0)
+        var headlines = response?.Hits
+            ?.Select(hit => hit.Title ?? hit.StoryTitle)
+            ?.Where(title => !string.IsNullOrWhiteSpace(title))
+            ?.Select(title => title!.Trim())
+            ?.Take(5)
+            ?.ToList();
+
+        if (headlines is null || headlines.Count == 0)
         {
-            return new[] { "новости недоступны" };
+            return ["новости недоступны"];
         }
 
-        return posts
-            .Select(p => p.Title)
-            .Where(title => !string.IsNullOrWhiteSpace(title))
-            .Select(title => title.Trim())
-            .ToList();
+        return headlines;
+    }
+
+    private async Task<IReadOnlyList<string>> GetSpaceflightHeadlinesAsync(CancellationToken cancellationToken)
+    {
+        const string url = "https://api.spaceflightnewsapi.net/v4/articles/?limit=5";
+        var response = await _httpClient.GetFromJsonAsync<SpaceflightResponse>(url, cancellationToken);
+
+        var headlines = response?.Results
+            ?.Select(article => article.Title)
+            ?.Where(title => !string.IsNullOrWhiteSpace(title))
+            ?.Select(title => title.Trim())
+            ?.Take(5)
+            ?.ToList();
+
+        if (headlines is null || headlines.Count == 0)
+        {
+            return ["новости недоступны"];
+        }
+
+        return headlines;
     }
 }
 
@@ -252,13 +328,8 @@ internal static partial class TextAnalyzer
 internal sealed record DashboardResult(
     string WeatherSummary,
     string RatesSummary,
-    IReadOnlyList<string> Headlines);
-
-internal sealed class PostDto
-{
-    public int Id { get; set; }
-    public string Title { get; set; } = string.Empty;
-}
+    IReadOnlyList<string> HackerNewsHeadlines,
+    IReadOnlyList<string> SpaceflightHeadlines);
 
 internal sealed class WeatherApiResponse
 {
@@ -278,3 +349,43 @@ internal sealed class RatesApiResponse
 {
     public Dictionary<string, double> Rates { get; set; } = new();
 }
+
+internal sealed class CbrDailyResponse
+{
+    public CbrValute? Valute { get; set; }
+}
+
+internal sealed class CbrValute
+{
+    [System.Text.Json.Serialization.JsonPropertyName("USD")]
+    public CbrCurrency? Usd { get; set; }
+}
+
+internal sealed class CbrCurrency
+{
+    [System.Text.Json.Serialization.JsonPropertyName("Value")]
+    public double Value { get; set; }
+}
+
+internal sealed class HackerNewsResponse
+{
+    public List<HackerNewsHit> Hits { get; set; } = [];
+}
+
+internal sealed class HackerNewsHit
+{
+    public string? Title { get; set; }
+    public string? StoryTitle { get; set; }
+}
+
+internal sealed class SpaceflightResponse
+{
+    public List<SpaceflightArticle> Results { get; set; } = [];
+}
+
+internal sealed class SpaceflightArticle
+{
+    public string Title { get; set; } = string.Empty;
+}
+
+
