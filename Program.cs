@@ -1,6 +1,5 @@
 ﻿using System.Collections.Concurrent;
 using System.Net.Http.Json;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace Lab3.NewsAggregator;
@@ -51,6 +50,11 @@ internal static partial class Program
 
     private static void ListenForCancellation(CancellationTokenSource cts)
     {
+        if (Console.IsInputRedirected)
+        {
+            return;
+        }
+
         while (!cts.IsCancellationRequested)
         {
             if (!Console.KeyAvailable)
@@ -80,9 +84,9 @@ internal sealed class DataAggregator
 
     public async Task<DashboardResult> LoadDashboardAsync(CancellationToken cancellationToken)
     {
-        var weatherTask = GetWeatherSummaryAsync(cancellationToken);
-        var ratesTask = GetRatesSummaryAsync(cancellationToken);
-        var headlinesTask = GetHeadlinesAsync(cancellationToken);
+        var weatherTask = GetWeatherSummarySafeAsync(cancellationToken);
+        var ratesTask = GetRatesSummarySafeAsync(cancellationToken);
+        var headlinesTask = GetHeadlinesSafeAsync(cancellationToken);
 
         await Task.WhenAll(weatherTask, ratesTask, headlinesTask);
 
@@ -90,6 +94,59 @@ internal sealed class DataAggregator
             weatherTask.Result,
             ratesTask.Result,
             headlinesTask.Result);
+    }
+
+    private async Task<string> GetWeatherSummarySafeAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await GetWeatherSummaryAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return "данные погоды недоступны (offline fallback)";
+        }
+    }
+
+    private async Task<string> GetRatesSummarySafeAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await GetRatesSummaryAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return "данные о курсах недоступны (offline fallback)";
+        }
+    }
+
+    private async Task<IReadOnlyList<string>> GetHeadlinesSafeAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await GetHeadlinesAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return
+            [
+                "offline fallback: local async headline one",
+                "offline fallback: local async headline two",
+                "offline fallback: local async headline three"
+            ];
+        }
     }
 
     private async Task<string> GetWeatherSummaryAsync(CancellationToken cancellationToken)
